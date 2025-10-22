@@ -5,7 +5,7 @@ const db = require('../db');
 const authenticateToken = require('../middleware/authenticateToken');
 
 const router = express.Router();
-const saltRounds = 10;
+const saltRounds = 11;
 
 router.post('/register', async (req, res) => {
 
