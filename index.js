@@ -1,38 +1,46 @@
-// index.js
-require('dotenv').config(); // Carga las variables de .env
-const express = require('express');
-const cors = require('cors');
+require("dotenv").config();
 
-const authRoutes = require('./routes/auth');
-const layerRoutes = require('./routes/layers');
-const registrosRoutes = require('./routes/registros'); // 👈 NUEVO
+const express = require("express");
+const cors = require("cors");
+
+const authRoutes = require("./routes/auth");
+const layersRoutes = require("./routes/layers");
+const registrosRoutes = require("./routes/registros");
 
 const app = express();
-const PORT = process.env.PORT || 5001;
 
-app.use(cors());
+// --- CORS: habilita origen 5173 y 3000, Authorization y Content-Type ---
+const allowedOrigins = [
+    "http://localhost:5173",
+    "http://localhost:3000",
+];
+
+app.use(cors({
+    origin: function (origin, callback) {
+        // permitir herramientas sin origin (curl, Postman) y orígenes listados
+        if (!origin || allowedOrigins.includes(origin)) {
+            return callback(null, true);
+        }
+        return callback(new Error("Origen no permitido por CORS: " + origin));
+    },
+    methods: ["GET","POST","PUT","PATCH","DELETE","OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+    credentials: false, // true si vas a usar cookies
+}));
+
+// Responder preflight explícitamente (por si algún middleware corta el flujo)
+app.options("*", cors());
+
+// Body parser
 app.use(express.json());
-// en index.js, antes de app.use('/api/auth', authRoutes)
-const morgan = require('morgan');
-app.use(morgan('dev'));
-app.use((req, _res, next) => {
-  if (req.path.startsWith('/api/auth')) {
-    console.log('AUTH BODY =>', req.method, req.path, req.body);
-  }
-  next();
-});
 
+// Rutas
+app.get("/api/health", (_req, res) => res.json({ ok: true }));
+app.use("/api/auth", authRoutes);
+app.use("/api/layers", layersRoutes);
+app.use("/api/registros", registrosRoutes);
 
-// --- Rutas ---
-app.get('/', (req, res) => {
-  res.send('API de UnesLeaf Backend está funcionando!');
-});
-
-app.use('/api/auth', authRoutes);
-app.use('/api/layers', layerRoutes);
-app.use('/api/registros', registrosRoutes); // 👈 NUEVO
-
-// --- Iniciar Servidor ---
+const PORT = process.env.PORT || 5001;
 app.listen(PORT, () => {
-  console.log(`Servidor corriendo en http://localhost:${PORT}`);
+    console.log(`[server] http://localhost:${PORT}`);
 });
