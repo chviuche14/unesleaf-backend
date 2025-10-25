@@ -94,7 +94,7 @@ router.post('/login', async (req, res) => {
     res.json({ message: 'Login ok', token, user: { id: user.id, username: user.username, email: user.email } });
   } catch (e) {
     console.error(e);
-    res.status(500).json({ error: 'Error' });
+    res.status(500).json({ error: 'Error interno' });
   }
 });
 
