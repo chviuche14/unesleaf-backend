@@ -1,169 +1,176 @@
+// routes/auth.js
 const express = require('express');
-const bcrypt = require('bcrypt');
-const jwt = require('jsonwebtoken');
-const db = require('../db');
-const authenticateToken = require('../middleware/authenticateToken');
-
 const router = express.Router();
-const saltRounds = 10;
+const { Pool } = require('pg');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
 
+// --- Ajusta credenciales si las tienes en .env ---
+const pool = new Pool({
+  host: process.env.PGHOST || 'localhost',
+  user: process.env.PGUSER || 'postgres',
+  password: process.env.PGPASSWORD || 'postgres',
+  database: process.env.PGDATABASE || 'unesco',
+  port: process.env.PGPORT ? Number(process.env.PGPORT) : 5432,
+});
+const JWT_SECRET = process.env.JWT_SECRET || 'supersecret';
+
+// ------------------ helpers ------------------
+function signToken(user) {
+  // mete lo que necesites en el payload
+  return jwt.sign(
+    { id: user.id, email: user.email, username: user.username },
+    JWT_SECRET,
+    { expiresIn: '7d' }
+  );
+}
+
+function authRequired(req, res, next) {
+  const hdr = req.headers.authorization || '';
+  const token = hdr.startsWith('Bearer ') ? hdr.slice(7) : null;
+  if (!token) return res.status(401).json({ error: 'Token requerido' });
+  try {
+    req.user = jwt.verify(token, JWT_SECRET); // { id, email, username }
+    next();
+  } catch {
+    return res.status(401).json({ error: 'Token inválido' });
+  }
+}
+
+// ------------------ RUTAS ------------------
+
+// POST /api/auth/register
 router.post('/register', async (req, res) => {
-
-    const { username, email, password } = req.body;
-
+  try {
+    const { username, email, password } = req.body || {};
     if (!username || !email || !password) {
-        return res.status(400).json({ error: 'Todos los campos son requeridos' });
+      return res.status(400).json({ error: 'Faltan campos' });
+    }
+    if (password.length < 6) {
+      return res.status(400).json({ error: 'La contraseña debe tener al menos 6 caracteres' });
     }
 
-    try {
-        const userCheck = await db.query(
-            'SELECT * FROM users WHERE email = $1 OR username = $2',
-            [email, username]
-        );
+    const hash = await bcrypt.hash(password, 10);
 
-        if (userCheck.rows.length > 0) {
-            return res.status(409).json({ error: 'El email o nombre de usuario ya existe' });
-        }
+    const { rows } = await pool.query(
+      `INSERT INTO public.users (username, email, password_hash)
+       VALUES ($1, $2, $3)
+       RETURNING id, username, email, created_at`,
+      [username.trim(), email.trim().toLowerCase(), hash]
+    );
 
-        const passwordHash = await bcrypt.hash(password, saltRounds);
-
-        const newUser = await db.query(
-            'INSERT INTO users (username, email, password_hash) VALUES ($1, $2, $3) RETURNING id, username, email',
-            [username, email, passwordHash]
-        );
-
-        const token = jwt.sign(
-            { userId: newUser.rows[0].id },
-            process.env.JWT_SECRET,
-            { expiresIn: '1h' }
-        );
-
-        res.status(201).json({
-            message: 'Usuario creado exitosamente',
-            user: newUser.rows[0],
-            token: token,
-        });
-    } catch (err) {
-        console.error(err.message);
-        res.status(500).send('Error en el servidor');
+    const user = rows[0];
+    const token = signToken(user);
+    res.status(201).json({ message: 'Usuario creado', token, user });
+  } catch (e) {
+    // 23505 => unique_violation
+    if (e.code === '23505') {
+      return res.status(409).json({ error: 'El usuario o correo ya existe' });
     }
+    console.error(e);
+    res.status(500).json({ error: 'Error interno' });
+  }
 });
 
+// POST /api/auth/login
 router.post('/login', async (req, res) => {
-    const { email, password } = req.body;
-
+  try {
+    const { email, password } = req.body || {};
     if (!email || !password) {
-        return res.status(400).json({ error: 'Email y contraseña son requeridos' });
+      return res.status(400).json({ error: 'Faltan credenciales' });
     }
 
-    try {
-        const userResult = await db.query('SELECT * FROM users WHERE email = $1', [
-            email,
-        ]);
+    const { rows } = await pool.query(
+      'SELECT id, username, email, password_hash FROM public.users WHERE email = $1',
+      [email.trim().toLowerCase()]
+    );
+    if (!rows.length) return res.status(401).json({ error: 'Credenciales inválidas' });
 
-        if (userResult.rows.length === 0) {
-            return res.status(401).json({ error: 'Credenciales inválidas' });
-        }
-        const user = userResult.rows[0];
+    const user = rows[0];
+    const ok = await bcrypt.compare(password, user.password_hash);
+    if (!ok) return res.status(401).json({ error: 'Credenciales inválidas' });
 
-        const isMatch = await bcrypt.compare(password, user.password_hash);
-
-        if (!isMatch) {
-            return res.status(401).json({ error: 'Credenciales inválidas' });
-        }
-
-        const token = jwt.sign(
-            { userId: user.id },
-            process.env.JWT_SECRET,
-            { expiresIn: '1h' }
-        );
-
-        res.json({
-            message: 'Login exitoso',
-            user: { id: user.id, username: user.username, email: user.email },
-            token: token,
-        });
-    } catch (err) {
-        console.error(err.message);
-        res.status(500).send('Error en el servidor');
-    }
+    const token = signToken(user);
+    res.json({ message: 'Login ok', token, user: { id: user.id, username: user.username, email: user.email } });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Error interno' });
+  }
 });
 
-router.get('/profile', authenticateToken, async (req, res) => {
-    try {
-        const userId = req.user.userId;
-        const userResult = await db.query(
-            'SELECT id, username, email, created_at FROM users WHERE id = $1',
-            [userId]
-        );
-        if (userResult.rows.length === 0) {
-            return res.status(404).json({ error: 'Usuario no encontrado' });
-        }
-        res.json(userResult.rows[0]);
-    } catch (err) {
-        console.error(err.message);
-        res.status(500).send('Error en el servidor');
-    }
+// GET /api/auth/me  (para Perfil.jsx carga inicial)
+router.get('/me', authRequired, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT id, username, email, created_at FROM public.users WHERE id = $1',
+      [req.user.id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Usuario no encontrado' });
+    res.json({ user: rows[0] });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Error interno' });
+  }
 });
 
-router.put('/profile', authenticateToken, async (req, res) => {
-    const { username } = req.body;
-    const userId = req.user.userId;
-
-    if (!username) {
-        return res.status(400).json({ error: 'El nombre de usuario es requerido' });
+// PUT /api/auth/profile  (👉 la ruta que te daba 404)
+router.put('/profile', authRequired, async (req, res) => {
+  try {
+    const { username } = req.body || {};
+    if (!username || !username.trim()) {
+      return res.status(400).json({ error: 'username es requerido' });
+    }
+    if (username.trim().length < 3) {
+      return res.status(400).json({ error: 'El username debe tener al menos 3 caracteres' });
     }
 
-    try {
-        const updatedUser = await db.query(
-            'UPDATE users SET username = $1 WHERE id = $2 RETURNING id, username, email',
-            [username, userId]
-        );
+    const { rows } = await pool.query(
+      `UPDATE public.users
+         SET username = $1
+       WHERE id = $2
+       RETURNING id, username, email, created_at`,
+      [username.trim(), req.user.id]
+    );
 
-        if (updatedUser.rows.length === 0) {
-            return res.status(404).json({ error: 'Usuario no encontrado' });
-        }
-
-        res.json({ message: 'Perfil actualizado exitosamente', user: updatedUser.rows[0] });
-    } catch (err) {
-        console.error(err.message);
-        if (err.code === '23505') {
-            return res.status(409).json({ error: 'Ese nombre de usuario ya está en uso.' });
-        }
-        res.status(500).send('Error en el servidor');
+    if (!rows.length) return res.status(404).json({ error: 'Usuario no encontrado' });
+    res.json({ message: 'Perfil actualizado', user: rows[0] });
+  } catch (e) {
+    if (e.code === '23505') {
+      return res.status(409).json({ error: 'Ese nombre de usuario ya está en uso' });
     }
+    console.error(e);
+    res.status(500).json({ error: 'Error interno' });
+  }
 });
 
-
-router.post('/change-password', authenticateToken, async (req, res) => {
-    const { currentPassword, newPassword } = req.body;
-    const userId = req.user.userId;
-
+// POST /api/auth/change-password
+router.post('/change-password', authRequired, async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body || {};
     if (!currentPassword || !newPassword) {
-        return res.status(400).json({ error: 'Todos los campos son requeridos' });
+      return res.status(400).json({ error: 'Faltan campos' });
+    }
+    if (newPassword.length < 6) {
+      return res.status(400).json({ error: 'La nueva contraseña debe tener al menos 6 caracteres' });
     }
 
-    try {
-        const userResult = await db.query('SELECT password_hash FROM users WHERE id = $1', [userId]);
-        if (userResult.rows.length === 0) {
-            return res.status(404).json({ error: 'Usuario no encontrado' });
-        }
-        const currentHash = userResult.rows[0].password_hash;
+    const { rows } = await pool.query(
+      'SELECT id, password_hash FROM public.users WHERE id = $1',
+      [req.user.id]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Usuario no encontrado' });
 
-        const isMatch = await bcrypt.compare(currentPassword, currentHash);
-        if (!isMatch) {
-            return res.status(401).json({ error: 'La contraseña actual es incorrecta' });
-        }
+    const ok = await bcrypt.compare(currentPassword, rows[0].password_hash);
+    if (!ok) return res.status(401).json({ error: 'Contraseña actual incorrecta' });
 
-        const newPasswordHash = await bcrypt.hash(newPassword, saltRounds);
-        await db.query('UPDATE users SET password_hash = $1 WHERE id = $2', [newPasswordHash, userId]);
+    const newHash = await bcrypt.hash(newPassword, 10);
+    await pool.query('UPDATE public.users SET password_hash = $1 WHERE id = $2', [newHash, req.user.id]);
 
-        res.json({ message: 'Contraseña actualizada exitosamente' });
-
-    } catch (err) {
-        console.error(err.message);
-        res.status(500).send('Error en el servidor');
-    }
+    res.json({ message: 'Contraseña actualizada' });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Error interno' });
+  }
 });
 
 module.exports = router;
